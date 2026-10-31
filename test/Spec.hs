@@ -72,6 +72,18 @@ cabalNone =
   , "  main-is: Main.hs"
   ]
 
+cycleCabal :: [String]
+cycleCabal =
+  [ "name: foo", "library core", "  build-depends: base, foo:utils"
+  , "library utils", "  build-depends: base" ]
+
+chainCabal :: [String]
+chainCabal =
+  [ "name: foo"
+  , "library a", "  build-depends: base"
+  , "library b", "  build-depends: base, foo:a"
+  , "library c", "  build-depends:", "      base,", "      b" ]
+
 main :: IO ()
 main = do
   let an = analyse sampleOutput
@@ -138,6 +150,10 @@ main = do
           "second dep goes under the first"
           (Added ["library", "  build-depends:" ++ replicate 10 ' ' ++ "base,", replicate 26 ' ' ++ "mtl"])
           (addDependency Nothing "mtl" ["library", "  build-depends:" ++ replicate 10 ' ' ++ "base"])
+      , check "cycle detected" True (wouldCreateCycle "foo" (Component KLibrary (Just "utils")) "foo:core" cycleCabal)
+      , check "no false cycle" False (wouldCreateCycle "foo" (Component KLibrary (Just "core")) "foo:utils" cycleCabal)
+      , check "indirect cycle" True (wouldCreateCycle "foo" (Component KLibrary (Just "a")) "foo:c" chainCabal)
+      , check "exe never cycles" False (wouldCreateCycle "foo" (Component KExecutable (Just "x")) "foo:core" cycleCabal)
       , check "unknown stanza" (NoSuchStanza "test-suite 'spec'") (addDependency (Just spec) "base" cabalTrailing)
       ]
   unless (and rs) exitFailure

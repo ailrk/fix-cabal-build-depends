@@ -3,6 +3,7 @@
 module FixCabalDeps.Edit
   ( EditResult (..)
   , addDependency
+  , wouldCreateCycle
   , packageName
   ) where
 
@@ -99,6 +100,47 @@ addDependency mcomp pkg ls =
           Just c -> insertAt (i + 1) (replicate c ' ' ++ pkg) (replaceAt i (addComma l) ls)
           where
             l = dropWhileEnd isSpace (ls !! i)
+
+-- | Would adding @pkg@ to the library @cur@ close a dependency cycle between
+-- libraries of the same package (@pname@)?
+wouldCreateCycle :: String -> Component -> String -> [String] -> Bool
+wouldCreateCycle pname cur pkg ls
+  | compKind cur /= KLibrary = False
+  | otherwise = maybe False (reaches []) (resolve (map toLower pkg))
+  where
+    lname = map toLower pname
+    stanzas = findStanzas ls
+    libs = [zComp s | s <- stanzas, compKind (zComp s) == KLibrary]
+
+    findLib l = find (\c -> fmap (map toLower) (compName c) == Just l) libs
+    resolve n
+      | n == lname = find ((== Nothing) . compName) libs
+      | (pk, ':' : l) <- break (== ':') n, pk == lname = findLib l
+      | otherwise = Nothing
+    resolveDep n = maybe (findLib n) Just (resolve n)
+
+    depsOf c = [t | s <- stanzas, zComp s == c, n <- stanzaDeps ls s, Just t <- [resolveDep (map toLower n)]]
+
+    -- is `cur` reachable from c?
+    reaches seen c
+      | c == cur = True
+      | c `elem` seen = False
+      | otherwise = any (reaches (c : seen)) (depsOf c)
+
+-- | Every name listed in any @build-depends@ field of the stanza.
+stanzaDeps :: [String] -> Stanza -> [String]
+stanzaDeps ls (Stanza _ s e) = go (s + 1)
+  where
+    go j
+      | j >= e = []
+      | isContent l && "build-depends:" `isPrefixOf` map toLower (trim l) =
+          let ind = indentOf l
+              cont = takeWhile (\k -> let m = ls !! k in not (isContent m) || indentOf m > ind) [j + 1 .. e - 1]
+              fieldLines = l : [ls !! k | k <- cont, isContent (ls !! k)]
+           in depNames fieldLines ++ go (j + 1 + length cont)
+      | otherwise = go (j + 1)
+      where
+        l = ls !! j
 
 ------------------------------------------------------------------------------
 -- Stanza discovery

@@ -3,7 +3,7 @@ module Main (main) where
 import Control.Exception (IOException, evaluate, try)
 import Control.Monad (when)
 import Data.Char (toLower)
-import Data.List (isInfixOf, sort)
+import Data.List (foldl', isInfixOf, sort)
 import Data.Maybe (fromMaybe)
 import System.Directory (copyFile, listDirectory)
 import System.Environment (getArgs)
@@ -29,7 +29,7 @@ data Opts = Opts
   }
 
 defaultCabalArgs :: [String]
-defaultCabalArgs = ["build", "all", "--enable-tests", "--enable-benchmarks", "--keep-going"]
+defaultCabalArgs = ["build", "all", "-j1", "--enable-tests", "--enable-benchmarks", "--keep-going"]
 
 usage :: String
 usage =
@@ -140,7 +140,17 @@ applyAll pname ls0 = foldl' go (ls0, [])
       Right mc ->
         let p = fPackage f
             lbl = maybe "the main library" describeComponent mc
-         in if maybe False (`selfDep` p) mc
+         in if maybe False (\c -> wouldCreateCycle pname c p ls) mc
+              then
+                ( ls
+                , outs
+                    ++ [ Note
+                           ( "not adding " ++ p ++ " to " ++ lbl ++ ": " ++ p ++ " already depends on it, "
+                               ++ "so this would create a cycle (the error is probably attributed to the wrong component)"
+                           )
+                       ]
+                )
+            else if maybe False (`selfDep` p) mc
               then
                 ( ls
                 , outs
