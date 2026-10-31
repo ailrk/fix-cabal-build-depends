@@ -1,7 +1,7 @@
 # fix-cabal-build-depends
 
 Runs `cabal build`, reads the compiler errors, adds any missing packages to your
-`.cabal` file, and repeats until nothing is missing. It supports pacakge with
+`.cabal` file, and repeats until nothing is missing. It supports package with
 multiple components.
 
 ## Install
