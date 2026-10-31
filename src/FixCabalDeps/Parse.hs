@@ -17,16 +17,29 @@ data Pending = Pending
   , _pResolved :: Bool
   }
 
+-- | What we know about the project while reading the output.
+data Env = Env
+  { eName :: String
+    -- ^ name of the package whose .cabal file we edit
+  , eResolve :: FilePath -> [Component]
+    -- ^ components whose hs-source-dirs contain a source file
+  }
+
 data St = St
   { stComp :: Maybe (Component, String)
+  , stFile :: Maybe FilePath -- ^ file of the last "path:l:c: error:" header
   , stPending :: Maybe Pending
   , stFinds :: [Finding] -- reversed
   , stUnres :: [(Maybe Component, String)] -- reversed
   }
 
 -- | Walk over the build output and collect what is missing, and where.
-analyse :: [String] -> Analysis
-analyse out =
+--
+-- An error is attributed to the component owning the file named in its
+-- @path:line:col: error:@ header; the last @Building …@ line is only the
+-- fallback (it is unreliable when cabal builds components in parallel).
+analyse :: String -> (FilePath -> [Component]) -> [String] -> Analysis
+analyse pname resolve out =
   Analysis
     { aFindings = dedupe (reverse (stFinds final))
     , aUnresolved = dedupe (reverse (stUnres final))
@@ -34,30 +47,56 @@ analyse out =
     , aCabalFileError = any ("Errors encountered when parsing cabal file" `isInfixOf`) out
     }
   where
-    final = flush (foldl' step (St Nothing Nothing [] []) (map (dropWhileEnd (== '\r')) out))
+    env = Env pname resolve
+    final = flush env (foldl' (step env) (St Nothing Nothing Nothing [] []) (map (dropWhileEnd (== '\r')) out))
 
-step :: St -> String -> St
-step st l
-  | Just c <- parseComponent l = (flush st) {stComp = Just c}
-  | Just m <- parseMissingModule l = (flush st) {stPending = Just (Pending m False)}
+step :: Env -> St -> String -> St
+step env st l
+  | Just c <- parseComponent l = (flush env st) {stComp = Just c}
+  | Just f <- errorFile l = (flush env st) {stFile = Just f}
+  | Just m <- parseMissingModule l = (flush env st) {stPending = Just (Pending m False)}
   | Just p <- hintPackage l =
       case stPending st of
-        Just (Pending m False) -> emit p st {stPending = Just (Pending m True)}
+        Just (Pending m False) -> emit env p st {stPending = Just (Pending m True)}
         Just (Pending _ True) -> st
-        Nothing -> emit p st
+        Nothing -> emit env p st
   | otherwise = st
+
+-- | The component an error belongs to.
+currentComp :: Env -> St -> Maybe (Component, String)
+currentComp env st = case stFile st of
+  Nothing -> stComp st
+  Just f -> case eResolve env f of
+    [] -> stComp st
+    cs ->
+      let c = case stComp st of
+            Just (c0, _) | c0 `elem` cs -> c0
+            _ -> head cs
+       in Just (c, eName env)
+
+-- | @src/Foo.hs:3:1: error:@ -> @src/Foo.hs@
+errorFile :: String -> Maybe FilePath
+errorFile l
+  | null l || isSpace (head l) || not (": error" `isInfixOf` l) = Nothing
+  | otherwise = case l of
+      (d : ':' : s : more) | s `elem` "/\\" -> (\p -> d : ':' : s : p) <$> go "" more
+      _ -> go "" l
+  where
+    go acc (':' : c : _) | (isDigit c || c == '(') && not (null acc) = Just (reverse acc)
+    go acc (x : xs) = go (x : acc) xs
+    go _ [] = Nothing
 
 -- | Finish the module we were looking at: if GHC gave no package hint for it,
 -- report it as unresolved (e.g. one of the project's own modules).
-flush :: St -> St
-flush st = case stPending st of
-  Just (Pending m False) -> st' {stUnres = (fmap fst (stComp st), m) : stUnres st'}
+flush :: Env -> St -> St
+flush env st = case stPending st of
+  Just (Pending m False) -> st' {stUnres = (fmap fst (currentComp env st), m) : stUnres st'}
   _ -> st'
   where
     st' = st {stPending = Nothing}
 
-emit :: String -> St -> St
-emit p st = st {stFinds = Finding (stComp st) p : stFinds st}
+emit :: Env -> String -> St -> St
+emit env p st = st {stFinds = Finding (currentComp env st) p : stFinds st}
 
 dedupe :: Eq a => [a] -> [a]
 dedupe = foldl' (\acc x -> if x `elem` acc then acc else acc ++ [x]) []

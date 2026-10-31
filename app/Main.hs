@@ -3,12 +3,12 @@ module Main (main) where
 import Control.Exception (IOException, evaluate, try)
 import Control.Monad (when)
 import Data.Char (toLower)
-import Data.List (foldl', isInfixOf, sort)
+import Data.List (foldl', isInfixOf, isPrefixOf, nub, sort)
 import Data.Maybe (fromMaybe)
 import System.Directory (copyFile, listDirectory)
 import System.Environment (getArgs)
 import System.Exit
-import System.FilePath (takeBaseName, takeExtension)
+import System.FilePath (normalise, splitDirectories, takeBaseName, takeDirectory, takeExtension, (</>))
 import System.IO
 import System.Process
 import Text.Read (readMaybe)
@@ -29,7 +29,7 @@ data Opts = Opts
   }
 
 defaultCabalArgs :: [String]
-defaultCabalArgs = ["build", "all", "-j1", "--enable-tests", "--enable-benchmarks", "--keep-going"]
+defaultCabalArgs = ["build", "all", "--enable-tests", "--enable-benchmarks", "--keep-going"]
 
 usage :: String
 usage =
@@ -91,7 +91,9 @@ loop opts file i
           putStrLn "\nBuild succeeded: no more missing dependencies."
           exitSuccess
         ExitFailure _ -> do
-          let an = analyse out
+          (ls, eol) <- readCabal file
+          let pname = fromMaybe (takeBaseName file) (packageName ls)
+              an = analyse pname (mkResolver file ls) out
           when (aSolverFailure an) $
             failWith
               "cabal could not resolve dependencies (see output above). A package that was just \
@@ -101,9 +103,7 @@ loop opts file i
               ( "cabal cannot parse " ++ file ++ " (see output above). "
                   ++ "Restore the backup with: cp " ++ file ++ ".bak " ++ file
               )
-          (ls, eol) <- readCabal file
-          let pname = fromMaybe (takeBaseName file) (packageName ls)
-              (ls', outcomes) = applyAll pname ls (aFindings an)
+          let (ls', outcomes) = applyAll pname ls (aFindings an)
               changed = ls' /= ls
           putStrLn ""
           mapM_ (putStrLn . render) outcomes
@@ -116,6 +116,21 @@ loop opts file i
                 else
                   failWith
                     "the build still fails, but no further dependency can be added automatically (see output above)"
+
+-- | Which components of this package own a source file? The deepest matching
+-- hs-source-dirs wins.
+mkResolver :: FilePath -> [String] -> FilePath -> [Component]
+mkResolver file ls path = nub [c | (n, c) <- scored, n == best]
+  where
+    p = splitDirectories (normalise path)
+    scored =
+      [ (if d == ["."] then 0 else length d, c)
+      | (c, dirs) <- sourceDirs ls
+      , d0 <- dirs
+      , let d = splitDirectories (normalise (takeDirectory file </> d0))
+      , d == ["."] || d `isPrefixOf` p
+      ]
+    best = maximum (map fst scored)
 
 data Outcome = Did String String | Note String
 

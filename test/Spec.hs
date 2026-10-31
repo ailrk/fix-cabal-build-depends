@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Control.Monad (unless)
+import Data.List (isPrefixOf)
 import System.Exit (exitFailure)
 
 import FixCabalDeps.Edit
@@ -72,6 +73,28 @@ cabalNone =
   , "  main-is: Main.hs"
   ]
 
+noResolve :: FilePath -> [Component]
+noResolve _ = []
+
+-- two components built in parallel: the "Building" lines say utils, the error is core's
+interleaved :: [String]
+interleaved =
+  [ "Building library 'core' for foo-1.0.."
+  , "Building library 'utils' for foo-1.0.."
+  , "core/A.hs:1:1: error: [GHC-87110]"
+  , "    Could not load module ‘B’."
+  , "    It is a member of the hidden package ‘foo-1.0:utils’."
+  , "utils/C.hs:7:1: error:"
+  , "    Could not load module ‘Data.Map’."
+  , "    It is a member of the hidden package ‘containers-0.6.7’."
+  ]
+
+byDir :: FilePath -> [Component]
+byDir p
+  | "core/" `isPrefixOf` p = [Component KLibrary (Just "core")]
+  | "utils/" `isPrefixOf` p = [Component KLibrary (Just "utils")]
+  | otherwise = []
+
 cycleCabal :: [String]
 cycleCabal =
   [ "name: foo", "library core", "  build-depends: base, foo:utils"
@@ -86,7 +109,7 @@ chainCabal =
 
 main :: IO ()
 main = do
-  let an = analyse sampleOutput
+  let an = analyse "demo" noResolve sampleOutput
   rs <-
     sequence
       [ check
@@ -101,20 +124,20 @@ main = do
       , check
           "solver failure"
           True
-          (aSolverFailure (analyse ["Error: [Cabal-7107] Could not resolve dependencies:"]))
+          (aSolverFailure (analyse "demo" noResolve ["Error: [Cabal-7107] Could not resolve dependencies:"]))
       , check "ascii quotes" ["foo"]
-          [ p | Finding _ p <- aFindings (analyse
+          [ p | Finding _ p <- aFindings (analyse "demo" noResolve
               [ "    Could not find module 'Foo.Bar'"
               , "    It is a member of the hidden package 'foo-1.2.3'." ]) ]
       , check
           "internal library"
           ["filehub:filehub-core", "foo"]
-          [ p | Finding _ p <- aFindings (analyse
+          [ p | Finding _ p <- aFindings (analyse "demo" noResolve
               [ "    Could not load module ‘Filehub.Core’"
               , "    It is a member of the hidden package ‘filehub-0.1.3.0:filehub-core’."
               , "    Could not load module ‘Foo’"
               , "    It is a member of the hidden package ‘foo-1.0:foo’." ]) ]
-      , check "cabal file error" True (aCabalFileError (analyse ["Errors encountered when parsing cabal file ./x.cabal:"]))
+      , check "cabal file error" True (aCabalFileError (analyse "demo" noResolve ["Errors encountered when parsing cabal file ./x.cabal:"]))
       , check "pkg:lib already present" AlreadyPresent
           (addDependency Nothing "filehub:filehub-core" ["library", "  build-depends: base, filehub:filehub-core"])
       , check "stripVersion" ("containers", "foo-bar", "base") (stripVersion "containers-0.6.7", stripVersion "foo-bar-1.2", stripVersion "base-4.18.0.0")
@@ -150,6 +173,16 @@ main = do
           "second dep goes under the first"
           (Added ["library", "  build-depends:" ++ replicate 10 ' ' ++ "base,", replicate 26 ' ' ++ "mtl"])
           (addDependency Nothing "mtl" ["library", "  build-depends:" ++ replicate 10 ' ' ++ "base"])
+      , check
+          "attribution by file path, not by last Building line"
+          [ Finding (Just (Component KLibrary (Just "core"), "foo")) "foo:utils"
+          , Finding (Just (Component KLibrary (Just "utils"), "foo")) "containers"
+          ]
+          (aFindings (analyse "foo" byDir interleaved))
+      , check
+          "source dirs"
+          [(Component KLibrary (Just "core"), ["core", "gen"]), (Component KExecutable (Just "x"), ["."])]
+          (sourceDirs ["library core", "  hs-source-dirs: core, gen", "executable x", "  main-is: M.hs"])
       , check "cycle detected" True (wouldCreateCycle "foo" (Component KLibrary (Just "utils")) "foo:core" cycleCabal)
       , check "no false cycle" False (wouldCreateCycle "foo" (Component KLibrary (Just "core")) "foo:utils" cycleCabal)
       , check "indirect cycle" True (wouldCreateCycle "foo" (Component KLibrary (Just "a")) "foo:c" chainCabal)

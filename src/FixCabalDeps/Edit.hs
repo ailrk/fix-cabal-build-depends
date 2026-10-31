@@ -4,6 +4,7 @@ module FixCabalDeps.Edit
   ( EditResult (..)
   , addDependency
   , wouldCreateCycle
+  , sourceDirs
   , packageName
   ) where
 
@@ -129,15 +130,33 @@ wouldCreateCycle pname cur pkg ls
 
 -- | Every name listed in any @build-depends@ field of the stanza.
 stanzaDeps :: [String] -> Stanza -> [String]
-stanzaDeps ls (Stanza _ s e) = go (s + 1)
+stanzaDeps ls st = concatMap depNames (stanzaFields "build-depends:" ls st)
+
+-- | The @hs-source-dirs@ of every stanza (default: the package root).
+sourceDirs :: [String] -> [(Component, [FilePath])]
+sourceDirs ls = [(zComp st, dirs st) | st <- findStanzas ls]
+  where
+    dirs st = case concatMap fieldWords (stanzaFields "hs-source-dirs:" ls st) of
+      [] -> ["."]
+      ds -> ds
+    fieldWords fl =
+      filter (not . null) . map (filter (/= '"')) $
+        concatMap
+          (words . map (\c -> if c == ',' then ' ' else c))
+          (drop (length "hs-source-dirs:") (trim (head fl)) : map trim (tail fl))
+
+-- | The lines of every field called @key@ (lower case, with colon) in a stanza,
+-- one group per field, including continuation lines.
+stanzaFields :: String -> [String] -> Stanza -> [[String]]
+stanzaFields key ls (Stanza _ s e) = go (s + 1)
   where
     go j
       | j >= e = []
-      | isContent l && "build-depends:" `isPrefixOf` map toLower (trim l) =
+      | isContent l && key `isPrefixOf` map toLower (trim l) =
           let ind = indentOf l
               cont = takeWhile (\k -> let m = ls !! k in not (isContent m) || indentOf m > ind) [j + 1 .. e - 1]
               fieldLines = l : [ls !! k | k <- cont, isContent (ls !! k)]
-           in depNames fieldLines ++ go (j + 1 + length cont)
+           in fieldLines : go (j + 1 + length cont)
       | otherwise = go (j + 1)
       where
         l = ls !! j
